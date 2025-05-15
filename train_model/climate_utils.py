@@ -116,3 +116,4 @@ def prepare_input_vector(lat, lon, target_month=0):
 
     # Model girdisi hazırlama
     return [encoded_soil_type, ph, k, p, n, temperature, humidity]
+
