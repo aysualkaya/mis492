@@ -1,2 +1,2 @@
 # mis492
-mis 492 project
+Data-Driven Crop Recommendation System
