@@ -1,4 +1,3 @@
-# API
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from train_model.climate_utils import get_location_details, prepare_input_vector, fetch_soil_with_fallback
@@ -29,15 +28,13 @@ async def predict(data: LocationData):
     try:
         # Lokasyon detayları
         location_name = get_location_details(data.lat, data.lon)
-        if location_name == "Unknown Location":
-            raise HTTPException(status_code=400, detail="Location not found or invalid coordinates.")
+        
+        # Geçersiz koordinatlar kontrolü
+        if "Unknown City" in location_name or "Unknown Country" in location_name:
+            raise HTTPException(status_code=400, detail="Invalid coordinates. Please provide valid latitude and longitude.")
 
         # Girdi vektörü hazırlama
-        try:
-            input_vector = prepare_input_vector(data.lat, data.lon, data.month)
-        except ValueError as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
+        input_vector = prepare_input_vector(data.lat, data.lon, data.month)
         if len(input_vector) != 7:
             raise HTTPException(status_code=400, detail="Invalid input vector length.")
 
