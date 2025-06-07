@@ -3,18 +3,13 @@ import requests
 import numpy as np
 import os
 from dotenv import load_dotenv
-from sklearn.preprocessing import LabelEncoder
 import datetime
 
 load_dotenv()
 ee.Initialize(project='agromind-b2196')
 
-# Soil Type Label Encoder (Global)
-SOIL_TYPES = ["Black", "Red", "Peaty", "Saline", "Sandy", "Clay", "Loamy", "Silty", "Unknown"]
-SOIL_TYPE_ENCODER = LabelEncoder()
-SOIL_TYPE_ENCODER.fit(SOIL_TYPES)
-
 def get_location():
+    """Get current location using IP geolocation"""
     try:
         r = requests.get("https://ipinfo.io/json")
         lat, lon = map(float, r.json()["loc"].split(","))
@@ -24,6 +19,7 @@ def get_location():
         return 0.0, 0.0
 
 def get_location_details(lat, lon):
+    """Get human-readable location details from coordinates"""
     url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -39,12 +35,26 @@ def get_location_details(lat, lon):
         return "Unknown Location"
 
 def kelvin_to_celsius(k):
+    """Convert Kelvin to Celsius"""
     return k - 273.15
 
 def dewpoint_to_humidity(temp_c, dewpoint_c):
+    """Calculate relative humidity from temperature and dewpoint"""
     return max(0, min(100, 100 * (112 - 0.1 * temp_c + dewpoint_c) / (112 + 0.9 * temp_c)))
 
 def get_weighted_climate(lat, lon, target_month=0):
+    """
+    Get weighted climate data for a specific location and month.
+    Recent years are weighted more heavily than older years.
+    
+    Args:
+        lat (float): Latitude
+        lon (float): Longitude  
+        target_month (int): Target month (1-12), if 0 uses current month
+        
+    Returns:
+        dict: Temperature and humidity data
+    """
     point = ee.Geometry.Point(lon, lat)
     years = list(range(2000, 2025))
     weights = [0.1 + 0.9 * ((y - 2000) / (2024 - 2000)) for y in years]
@@ -79,79 +89,3 @@ def get_weighted_climate(lat, lon, target_month=0):
     humidity = dewpoint_to_humidity(temp_c, dew_c)
 
     return {"temperature": round(temp_c, 2), "humidity": round(humidity, 2)}
-
-def fetch_soil_with_fallback(lat, lon, max_radius=0.5, step=0.1):
-    from train_model.soil_utils import get_soil_data
-    try:
-        soil_data = get_soil_data(lat, lon)
-        if soil_data:
-            print(f"✅ Soil data found at ({lat}, {lon}): {soil_data}")
-            return soil_data
-
-        for radius in [step * i for i in range(1, int(max_radius / step) + 1)]:
-            offsets = [(radius, 0), (-radius, 0), (0, radius), (0, -radius),
-                       (radius, radius), (-radius, -radius), (radius, -radius), (-radius, radius)]
-
-            for lat_offset, lon_offset in offsets:
-                nearby_data = get_soil_data(lat + lat_offset, lon + lon_offset)
-                if nearby_data:
-                    print(f"✅ Soil data found at ({lat + lat_offset}, {lon + lon_offset}): {nearby_data}")
-                    return nearby_data
-
-        print(f"⚠️ No soil data found for ({lat}, {lon}) or nearby areas.")
-        return None
-
-    except Exception as e:
-        print(f"❌ Error fetching soil data: {e}")
-        return None
-
-def map_texture_to_soil_type(texture_class, clay, sand, silt):
-    if texture_class != "Unknown":
-        return texture_class.capitalize()
-    elif clay > 40:
-        return "Clay"
-    elif sand > 70:
-        return "Sandy"
-    elif silt > 40:
-        return "Silty"
-    elif 20 < clay <= 40 and 20 < sand <= 70 and 20 < silt <= 70:
-        return "Loamy"
-    elif clay > 20 and sand < 20 and silt < 20:
-        return "Black"
-    elif sand > 60 and clay < 10:
-        return "Red"
-    elif silt > 50 and clay < 10 and sand < 20:
-        return "Peaty"
-    elif sand > 20 and silt > 20 and clay < 10:
-        return "Saline"
-    else:
-        return "Unknown"
-
-def prepare_input_vector(lat, lon, target_month=0):
-    soil_data = fetch_soil_with_fallback(lat, lon)
-    if not soil_data:
-        print("⚠️ No soil data found even with fallback, using only climate data.")
-        soil_data = {}
-
-    print(f"🪴 Toprak Verisi: {soil_data}")
-    climate_data = get_weighted_climate(lat, lon, target_month)
-    if not climate_data:
-        raise ValueError("❌ No valid climate data found. Cannot proceed with prediction.")
-
-    texture_class = soil_data.get("texture_class", "Unknown")
-    clay = soil_data.get("clay", 0.0)
-    sand = soil_data.get("sand", 0.0)
-    silt = soil_data.get("silt", 0.0)
-    soil_type = map_texture_to_soil_type(texture_class, clay, sand, silt)
-    encoded_soil_type = SOIL_TYPE_ENCODER.transform([soil_type])[0]
-
-    ph = soil_data.get("ph", 0.0)
-    n = soil_data.get("n", 0.0)
-    p = soil_data.get("p", 0.0)
-    k = soil_data.get("k", 0.0)
-    temperature = climate_data.get("temperature", 0.0)
-    humidity = climate_data.get("humidity", 0.0)
-
-    input_vector = [encoded_soil_type, ph, k, p, n, temperature, humidity]
-    print(f"📊 Girdi Vektörü: {input_vector} (Soil Data: {soil_data})")
-    return input_vector
