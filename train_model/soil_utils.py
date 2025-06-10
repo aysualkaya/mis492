@@ -1,161 +1,190 @@
-import requests 
+import httpx
 import logging
-from sklearn.preprocessing import LabelEncoder
+import json
 
 logger = logging.getLogger(__name__)
 
-# SoilGrids API Configuration
-SOILGRIDS_API_URL = "https://rest.isric.org/soilgrids/v2.0/properties/query"
-HEADERS = {"Accept": "application/json"}
-PROPERTIES = {
-    "ph": "phh2o",
-    "n": "nitrogen", 
-    "p": "phosphorus",
-    "k": "potassium",
-    "clay": "clay",
-    "sand": "sand",
-    "silt": "silt"
+# Soil type encoder mapping
+SOIL_TYPE_ENCODER = {
+    "Black": 0,
+    "Clay": 1,
+    "Loamy": 2,
+    "Peaty": 3,
+    "Red": 4,
+    "Saline": 5,
+    "Sandy": 6,
+    "Unknown": 7
 }
-DEFAULT_DEPTH = "0-5cm"
 
-# Global Soil Type Configuration
-SOIL_TYPES = ["Black", "Red", "Peaty", "Saline", "Sandy", "Clay", "Loamy", "Silty", "Unknown"]
-SOIL_TYPE_ENCODER = LabelEncoder()
-SOIL_TYPE_ENCODER.fit(SOIL_TYPES)
+def encode_soil_type(label, encoder=None):
+    """Encode soil type label to numeric value"""
+    if encoder is None:
+        encoder = SOIL_TYPE_ENCODER
+    return encoder.get(label, encoder["Unknown"])
 
-def get_soil_data(lat, lon):
+def get_partial_soil_data(lat, lon):
     """
-    Fetch soil data from SoilGrids API for given coordinates.
-    
+    Fetch soil data from SoilGrids API
     Args:
-        lat (float): Latitude
-        lon (float): Longitude
-        
-    Returns:
-        dict: Soil properties or None if no data available
+        lat: Latitude (North-South position)
+        lon: Longitude (East-West position)
     """
-    try:
-        url = f"{SOILGRIDS_API_URL}?lon={lon}&lat={lat}&property={'&property='.join(PROPERTIES.values())}&depth={DEFAULT_DEPTH}"
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        data = response.json()
+    base_url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
+    properties = ["phh2o", "nitrogen", "clay", "sand", "silt"]
 
-        result = {}
-        for key, soilgrid_key in PROPERTIES.items():
-            try:
-                value = data["properties"][soilgrid_key]["mean"]
-                if isinstance(value, list):
-                    result[key] = float(value[0])
-                else:
-                    result[key] = float(value)
-            except Exception:
-                logger.warning(f"Missing or malformed data for {key}")
-                result[key] = None
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://rest.isric.org/soilgrids/v2.0/docs",
+        "Origin": "https://rest.isric.org"
+    }
 
-        return result if any(v is not None for v in result.values()) else None
-
-    except Exception as e:
-        logger.error(f"SoilGrids API error: {e}")
-        return None
-
-def get_soil_data_with_fallback(lat, lon, max_radius=0.5, step=0.1):
-    """
-    Fetch soil data with fallback to nearby locations if no data found.
+    # Log the coordinates being used
+    logger.info(f"🌍 Fetching soil data for coordinates: lat={lat}, lon={lon}")
     
-    Args:
-        lat (float): Latitude
-        lon (float): Longitude
-        max_radius (float): Maximum search radius in degrees
-        step (float): Step size for expanding search
-        
-    Returns:
-        dict: Soil properties or None if no data found
-    """
+    params = {
+        "lon": lon,
+        "lat": lat,
+        "property": properties,
+        "depth": "0-5cm",
+        "value": "mean"
+    }
+    
     try:
-        # Try exact location first
-        soil_data = get_soil_data(lat, lon)
-        if soil_data:
-            logger.info(f"✅ Soil data found at ({lat}, {lon}): {soil_data}")
-            return soil_data
-
-        # Expand search in nearby areas
-        for radius in [step * i for i in range(1, int(max_radius / step) + 1)]:
-            offsets = [
-                (radius, 0), (-radius, 0), (0, radius), (0, -radius),
-                (radius, radius), (-radius, -radius), 
-                (radius, -radius), (-radius, radius)
-            ]
-
-            for lat_offset, lon_offset in offsets:
-                nearby_data = get_soil_data(lat + lat_offset, lon + lon_offset)
-                if nearby_data:
-                    logger.info(f"✅ Soil data found at ({lat + lat_offset}, {lon + lon_offset}): {nearby_data}")
-                    return nearby_data
-
-        logger.warning(f"⚠️ No soil data found for ({lat}, {lon}) or nearby areas.")
-        return None
-
+        response = httpx.get(base_url, params=params, headers=headers, timeout=30)
+        logger.info(f"📡 API URL: {response.url}")
+        logger.info(f"📄 Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Debug: Log the raw response structure
+            logger.debug(f"📊 Raw response keys: {list(data.keys())}")
+            if "properties" in data:
+                logger.debug(f"Properties keys: {list(data['properties'].keys())}")
+                if "layers" in data["properties"]:
+                    logger.debug(f"Number of layers: {len(data['properties']['layers'])}")
+            
+            soil_data = {}
+            
+            # Check if we have the expected structure
+            if "properties" not in data:
+                logger.error("❌ No 'properties' key in API response")
+                return None
+                
+            if "layers" not in data["properties"]:
+                logger.error("❌ No 'layers' key in properties")
+                return None
+            
+            layers = data["properties"]["layers"]
+            if not layers:
+                logger.error("❌ Empty layers array")
+                return None
+            
+            # Process each property layer
+            for layer in layers:
+                prop_name = layer.get("name")
+                if not prop_name:
+                    logger.warning("⚠️ Layer without name found")
+                    continue
+                    
+                logger.debug(f"Processing layer: {prop_name}")
+                
+                if prop_name in properties:
+                    # Check if we have depths data
+                    if "depths" not in layer:
+                        logger.warning(f"⚠️ No depths data for {prop_name}")
+                        continue
+                        
+                    depths_data = layer.get("depths", [])
+                    if not depths_data:
+                        logger.warning(f"⚠️ Empty depths array for {prop_name}")
+                        continue
+                    
+                    # Find the 0-5cm depth data
+                    target_depth = None
+                    for depth_info in depths_data:
+                        depth_label = depth_info.get("label", "")
+                        logger.debug(f"  Found depth: {depth_label}")
+                        if depth_label == "0-5cm":
+                            target_depth = depth_info
+                            break
+                    
+                    if target_depth:
+                        # Check if values exist
+                        if "values" not in target_depth:
+                            logger.warning(f"⚠️ No values section for {prop_name} at 0-5cm")
+                            continue
+                            
+                        values = target_depth.get("values", {})
+                        mean_value = values.get("mean")
+                        
+                        if mean_value is not None:
+                            # Apply unit conversion
+                            unit_measure = layer.get("unit_measure", {})
+                            d_factor = unit_measure.get("d_factor", 1)
+                            
+                            # Convert based on d_factor
+                            converted_value = mean_value / d_factor
+                            soil_data[prop_name] = converted_value
+                            logger.info(f"✅ {prop_name.upper()}: {converted_value} (raw: {mean_value}, d_factor: {d_factor})")
+                        else:
+                            logger.warning(f"⚠️ No mean value for {prop_name.upper()}")
+                            logger.debug(f"  Available values: {list(values.keys())}")
+                    else:
+                        logger.warning(f"⚠️ No 0-5cm depth data for {prop_name.upper()}")
+                        # Log available depths for debugging
+                        available_depths = [d.get("label", "unknown") for d in depths_data]
+                        logger.debug(f"  Available depths: {available_depths}")
+            
+            if not soil_data:
+                logger.warning("⚠️ No soil data extracted from API response")
+                # Log the full response for debugging
+                logger.debug(f"Full response for debugging: {json.dumps(data, indent=2)}")
+                return None
+                
+        else:
+            logger.warning(f"⚠️ API request failed with status {response.status_code}")
+            logger.debug(f"Response content: {response.text[:500]}")
+            return None
+            
     except Exception as e:
-        logger.error(f"❌ Error fetching soil data: {e}")
+        logger.error(f"❌ Exception fetching soil data: {e}")
         return None
+
+    # Convert to expected format for your model
+    processed_data = {
+        "ph": soil_data.get("phh2o", 7.0),  # pH is already converted by d_factor
+        "n": soil_data.get("nitrogen", 1.0),  # Nitrogen in g/kg
+        "p": 20.0,  # Default P value (not available from SoilGrids)
+        "k": 200.0,  # Default K value (not available from SoilGrids)
+        "clay_percent": soil_data.get("clay", 20.0),
+        "sand_percent": soil_data.get("sand", 40.0),
+        "silt_percent": soil_data.get("silt", 40.0)
+    }
+    
+    logger.info(f"✅ Processed soil data: {processed_data}")
+    return processed_data
 
 def map_texture_to_soil_type(clay, sand, silt):
-    """
-    Map soil texture components to soil type classification.
-    
-    Args:
-        clay (float): Clay percentage
-        sand (float): Sand percentage  
-        silt (float): Silt percentage
-        
-    Returns:
-        str: Soil type classification
-    """
-    if None in (clay, sand, silt):
+    """Map texture data to soil type"""
+    if clay is None or sand is None:
         return "Unknown"
     
-    # Clay-dominant soils
     if clay > 40:
         return "Clay"
-    # Sand-dominant soils  
-    elif sand > 70:
+    elif sand > 60:
         return "Sandy"
-    # Silt-dominant soils
     elif silt > 40:
-        return "Silty"
-    # Balanced loamy soils
-    elif 20 < clay < 35 and 20 < sand < 70 and 20 < silt < 70:
         return "Loamy"
-    # Organic-rich soils
-    elif clay < 20 and sand < 52 and silt > 28:
-        return "Peaty"
-    # High clay with specific minerals
-    elif clay > 20 and sand < 20 and silt < 20:
-        return "Black"
-    # Iron-rich sandy soils
-    elif sand > 60 and clay < 10:
-        return "Red"
-    # Salt-affected soils
-    elif sand > 20 and silt > 20 and clay < 10:
-        return "Saline"
+    elif clay > 20:
+        return "Loamy"
     else:
         return "Unknown"
 
-def encode_soil_type(label, encoder=None):
-    """
-    Encode soil type label to numerical value.
-    
-    Args:
-        label (str): Soil type label
-        encoder (LabelEncoder): Custom encoder, uses global if None
-        
-    Returns:
-        int: Encoded soil type value
-    """
-    if encoder is None:
-        encoder = SOIL_TYPE_ENCODER
-        
-    try:
-        return int(encoder.transform([label])[0])
-    except:
-        return int(encoder.transform(["Unknown"])[0])
+def validate_soil_data(data):
+    """Ensure all required soil keys are present and valid"""
+    if data is None:
+        return False
+    required_keys = ['ph', 'n', 'p', 'k']
+    return all(k in data and isinstance(data[k], (int, float)) for k in required_keys)
